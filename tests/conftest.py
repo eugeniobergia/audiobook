@@ -114,7 +114,7 @@ def test_database_url() -> str:
 @pytest.fixture
 async def db_pool(test_database_url: str) -> AsyncIterator[AsyncConnectionPool]:
     """A connection pool to the test database, emptied before each test."""
-    pool = create_pool(test_database_url)
+    pool = create_pool(test_database_url, max_size=10)
     await pool.open(wait=True)
     try:
         async with pool.connection() as conn:

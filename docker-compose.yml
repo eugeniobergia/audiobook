@@ -24,6 +24,12 @@ services:
       API_KEY: ${API_KEY}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      # Optional: no value here, so each is passed through only when set (in .env
+      # or the shell). When unset it's left out, and the app's default applies.
+      DB_POOL_MAX:
+      ITUNES_BASE_URL:
+      ITUNES_TIMEOUT_SECONDS:
+      PALETTE_CONCURRENCY:
       HOST: 0.0.0.0
       PORT: 8000
     ports:

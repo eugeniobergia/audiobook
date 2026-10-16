@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 from datetime import date
 from typing import Any
@@ -7,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
 
+from audiobook.api.routes import audiobooks as audiobook_routes
 from audiobook.models import Audiobook
 from audiobook.repositories.audiobooks import upsert_many
 
@@ -211,6 +213,87 @@ async def test_get_with_invalid_id(
 
     assert response.status_code == 422
     assert response.json()["error"]["details"][0]["loc"] == ["path", "audiobook_id"]
+
+
+# --- GET /audiobooks/export ----------------------------------------------------
+
+
+async def export_lines(
+    api: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> list[dict[str, Any]]:
+    response = await api.get("/audiobooks/export", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.text == "" or response.text.endswith("\n")
+    return [json.loads(line) for line in response.text.splitlines()]
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_export_headers(
+    api: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    response = await api.get("/audiobooks/export", headers=auth_headers)
+
+    assert response.status_code == 200  # not swallowed by /audiobooks/{id}
+    assert response.headers["content-type"] == "application/x-ndjson"
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="audiobooks.ndjson"'
+    )
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_export_lines_match_list_items(
+    api: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    listed = (await api.get("/audiobooks", headers=auth_headers)).json()["items"]
+
+    exported = await export_lines(api, auth_headers)
+
+    # Same objects as the list endpoint (so no content_hash), ordered by id.
+    assert exported == sorted(listed, key=lambda item: item["id"])
+    assert [item["id"] for item in exported] == [1, 2, 3, 4]
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_export_spanning_several_batches(
+    api: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audiobook_routes, "EXPORT_BATCH_SIZE", 3)
+
+    exported = await export_lines(api, auth_headers)
+
+    assert [item["id"] for item in exported] == [1, 2, 3, 4]
+
+
+async def test_export_of_empty_catalog(
+    api: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    assert await export_lines(api, auth_headers) == []
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_export_returns_its_connection_to_the_pool(
+    api: httpx.AsyncClient, auth_headers: dict[str, str], db_pool: AsyncConnectionPool
+) -> None:
+    # More exports than the pool has connections: a leak would block here.
+    for _ in range(12):
+        await export_lines(api, auth_headers)
+
+    stats = db_pool.get_stats()
+    assert stats["pool_available"] == stats["pool_size"]
+
+
+async def test_export_requires_api_key(api: httpx.AsyncClient) -> None:
+    assert (await api.get("/audiobooks/export")).status_code == 401
+
+
+def test_export_documented_as_ndjson(app: FastAPI) -> None:
+    operation = app.openapi()["paths"]["/audiobooks/export"]["get"]
+
+    assert "application/x-ndjson" in operation["responses"]["200"]["content"]
+    assert "401" in operation["responses"]
 
 
 # --- auth and docs --------------------------------------------------------------

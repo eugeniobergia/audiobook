@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
@@ -203,6 +203,28 @@ async def list_audiobooks(
     count_row = await cursor_.fetchone()
     total = count_row[0] if count_row is not None else 0
     return [_to_audiobook(row) for row in rows], total
+
+
+async def stream_audiobooks(
+    conn: AsyncConnection, batch_size: int = 1000
+) -> AsyncGenerator[list[Audiobook]]:
+    """Every audiobook, ordered by id, in batches of at most `batch_size`.
+
+    Uses a server-side cursor: Postgres keeps the query's results and we fetch
+    one batch at a time, so memory stays flat however big the catalog is. It's
+    a single query, so it sees one consistent snapshot of the table even while
+    ingestions write to it.
+
+    Holds the connection (and an open transaction) until the iteration ends.
+    """
+    # A named cursor is a server-side one; it only exists inside a transaction.
+    async with (
+        conn.transaction(),
+        conn.cursor(name="audiobooks_export", row_factory=dict_row) as cursor,
+    ):
+        await cursor.execute(_SELECT_AUDIOBOOK + sql.SQL("ORDER BY id"))
+        while rows := await cursor.fetchmany(batch_size):
+            yield [_to_audiobook(row) for row in rows]
 
 
 async def get_stats(conn: AsyncConnection) -> Stats:

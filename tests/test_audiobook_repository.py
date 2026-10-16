@@ -16,6 +16,7 @@ from audiobook.repositories.audiobooks import (
     get_states,
     get_stats,
     list_audiobooks,
+    stream_audiobooks,
     upsert_many,
 )
 
@@ -436,3 +437,77 @@ async def test_stats_count_by_genre_and_year_with_unknown_buckets(
 async def test_stats_of_empty_catalog(db_pool: AsyncConnectionPool) -> None:
     async with db_pool.connection() as conn:
         assert await get_stats(conn) == Stats(by_genre=[], by_release_year=[])
+
+
+# --- stream_audiobooks ----------------------------------------------------------
+
+
+async def stream_ids(pool: AsyncConnectionPool, batch_size: int) -> list[list[int]]:
+    """The ids of each batch the stream yields."""
+    async with pool.connection() as conn:
+        return [
+            [book.id for book in batch]
+            async for batch in stream_audiobooks(conn, batch_size=batch_size)
+        ]
+
+
+async def test_stream_of_empty_catalog(db_pool: AsyncConnectionPool) -> None:
+    assert await stream_ids(db_pool, batch_size=2) == []
+
+
+async def test_stream_yields_everything_by_id_in_batches(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    # Stored out of order, with titles that would sort differently.
+    await upsert(
+        db_pool,
+        *[make_book(id=id_, title=f"Title {6 - id_}") for id_ in (4, 2, 5, 1, 3)],
+    )
+
+    assert await stream_ids(db_pool, batch_size=2) == [[1, 2], [3, 4], [5]]
+
+
+async def test_stream_has_no_empty_last_batch(db_pool: AsyncConnectionPool) -> None:
+    await upsert(db_pool, *[make_book(id=id_) for id_ in (1, 2, 3, 4)])
+
+    assert await stream_ids(db_pool, batch_size=2) == [[1, 2], [3, 4]]
+
+
+async def test_stream_round_trips_every_field(db_pool: AsyncConnectionPool) -> None:
+    book = make_book(palette=("#112233",))
+    await upsert(db_pool, book)
+
+    async with db_pool.connection() as conn:
+        [[streamed]] = [batch async for batch in stream_audiobooks(conn)]
+
+    assert streamed.updated_at is not None
+    assert streamed.model_copy(update={"updated_at": None}) == book
+
+
+async def test_stream_uses_a_server_side_cursor(db_pool: AsyncConnectionPool) -> None:
+    await upsert(db_pool, *[make_book(id=id_) for id_ in (1, 2, 3)])
+
+    async with db_pool.connection() as conn:
+        batches = stream_audiobooks(conn, batch_size=1)
+        await anext(batches)
+        # Mid-stream, Postgres itself holds the cursor (and the remaining rows).
+        cursor = await conn.execute("SELECT name FROM pg_cursors")
+        assert await cursor.fetchall() == [("audiobooks_export",)]
+        await batches.aclose()
+
+
+async def test_stream_sees_one_snapshot_despite_concurrent_writes(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    await upsert(db_pool, make_book(id=10), make_book(id=20))
+
+    async with db_pool.connection() as conn:
+        batches = stream_audiobooks(conn, batch_size=1)
+        first = await anext(batches)
+        # Another connection writes while the export is half-way through.
+        await upsert(db_pool, make_book(id=30), make_book(id=20, title="Changed"))
+        rest = [batch async for batch in batches]
+
+    streamed = [book for batch in [first, *rest] for book in batch]
+    assert [book.id for book in streamed] == [10, 20]  # no id 30
+    assert streamed[1].title == "Dune"  # the old version of id 20

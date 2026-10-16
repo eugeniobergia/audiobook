@@ -14,7 +14,7 @@ from audiobook.db.db import apply_schema, create_pool
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
-    pool = create_pool(settings.database_url)
+    pool = create_pool(settings.database_url, max_size=settings.db_pool_max)
     # wait=True: fail at startup if the database is unreachable, not on the
     # first request.
     await pool.open(wait=True)

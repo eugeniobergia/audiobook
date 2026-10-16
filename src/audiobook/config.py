@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     postgres_db: str
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+    # Most connections the app's pool opens (it keeps 2 open). A running export
+    # holds one for its whole duration.
+    db_pool_max: int = Field(default=10, ge=2)
 
     # Where the API server listens. Use 0.0.0.0 inside a container.
     host: str = "localhost"
