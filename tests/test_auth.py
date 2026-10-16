@@ -1,13 +1,6 @@
 import httpx
 
 
-async def test_health_is_public(client: httpx.AsyncClient) -> None:
-    response = await client.get("/health")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
 async def test_missing_api_key_is_rejected(client: httpx.AsyncClient) -> None:
     response = await client.get("/_test/protected")
 

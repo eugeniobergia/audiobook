@@ -53,7 +53,7 @@ the API answers `401`. Errors always have the same shape:
 
 | Method and path | What it does |
 |---|---|
-| `GET /health` | Health check (public) |
+| `GET /health` | Health check (public): 200 if the app is up and the database answers, else 503 |
 | `POST /ingestions` | Fetch audiobooks from iTunes, clean and store them |
 | `GET /audiobooks` | List audiobooks: `q` (title or author), `genre`, `limit`, `offset` |
 | `GET /audiobooks/{id}` | One audiobook, by its iTunes collection id |
