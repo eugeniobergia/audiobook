@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "colorthief>=0.2.1",
     "fastapi>=0.143.2",
     "httpx>=0.28.1",
