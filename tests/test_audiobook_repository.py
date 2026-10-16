@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from typing import Any
 
+import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
@@ -208,15 +209,41 @@ async def test_mixed_batch_counts(db_pool: AsyncConnectionPool) -> None:
     assert result == UpsertResult(created=2, updated=1)
 
 
-async def test_upsert_runs_in_the_callers_transaction(
-    db_pool: AsyncConnectionPool,
-) -> None:
+async def test_upsert_commits_on_its_own(db_pool: AsyncConnectionPool) -> None:
     async with db_pool.connection() as conn:
         await upsert_many(conn, [make_book()])
-        await conn.rollback()
+        await conn.rollback()  # too late: upsert_many already committed
+
+    async with db_pool.connection() as conn:
+        assert 1 in await get_states(conn, [1])
+
+
+async def test_upsert_joins_the_callers_explicit_transaction(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    # force_rollback: undo everything in the transaction block when it ends.
+    async with (
+        db_pool.connection() as conn,
+        conn.transaction(force_rollback=True),
+    ):
+        await upsert_many(conn, [make_book()])
 
     async with db_pool.connection() as conn:
         assert await get_states(conn, [1]) == {}
+
+
+async def test_upsert_is_all_or_nothing(db_pool: AsyncConnectionPool) -> None:
+    # 2**63 doesn't fit in BIGINT: Postgres rejects the third row, after the
+    # first two were already sent. autocommit=True: no help from the caller.
+    books = [make_book(id=1), make_book(id=2), make_book(id=2**63)]
+
+    async with db_pool.connection() as conn:
+        await conn.set_autocommit(True)
+        with pytest.raises(psycopg.errors.NumericValueOutOfRange):
+            await upsert_many(conn, books)
+
+    async with db_pool.connection() as conn:
+        assert await get_states(conn, [1, 2]) == {}
 
 
 @pytest.mark.parametrize("palette", [("#112233",), None])

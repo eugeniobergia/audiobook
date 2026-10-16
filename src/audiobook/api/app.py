@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from audiobook.api.auth import require_api_key
 from audiobook.api.errors import ErrorResponse, register_error_handlers
-from audiobook.api.routes import health
+from audiobook.api.routes import health, ingestions
 from audiobook.config import get_settings
 from audiobook.db.db import apply_schema, create_pool
 
@@ -52,6 +52,9 @@ def create_app() -> FastAPI:
             401: {"model": ErrorResponse, "description": "Missing or invalid API key"}
         },
     )
+    # Include feature routers before adding `protected` to the app: FastAPI copies
+    # a router's routes when it's included, so later additions would be lost.
+    protected.include_router(ingestions.router)
     app.include_router(protected)
 
     return app

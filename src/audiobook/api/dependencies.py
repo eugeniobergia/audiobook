@@ -1,10 +1,24 @@
 from collections.abc import AsyncIterator
 
+import httpx
 from fastapi import Request
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from audiobook.clients.itunes import ITunesClient
+
+
+def get_pool(request: Request) -> AsyncConnectionPool:
+    """FastAPI dependency: the app's connection pool, for work that should borrow
+    connections only briefly (e.g. ingestion, which downloads covers in between)."""
+    pool: AsyncConnectionPool = request.app.state.pool
+    return pool
+
+
+def get_http(request: Request) -> httpx.AsyncClient:
+    """FastAPI dependency: the app's shared HTTP client (e.g. for cover images)."""
+    http: httpx.AsyncClient = request.app.state.http
+    return http
 
 
 async def get_conn(request: Request) -> AsyncIterator[AsyncConnection]:

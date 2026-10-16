@@ -6,8 +6,8 @@ from psycopg.types.json import Jsonb
 
 from audiobook.models import Audiobook
 
-# All functions take a connection and run inside the caller's transaction: the
-# caller decides when to commit (e.g. by leaving `async with pool.connection()`).
+# All functions take a connection from the caller. Reads run in whatever
+# transaction the connection has; see upsert_many for how writes commit.
 
 
 class UpsertResult(NamedTuple):
@@ -84,12 +84,19 @@ async def upsert_many(
     database: a book identical to the stored row (same hash and palette) is
     neither. `updated_at` is set by the database (the column default on insert,
     now() on update); the model's value is ignored.
+
+    All or nothing, and committed when it returns: if any book fails, none are
+    stored. To combine it with other writes, call it inside your own
+    `async with conn.transaction():` block; it then joins that transaction (as a
+    savepoint) and you decide whether it all commits.
     """
     params = [_to_params(book) for book in books]
     if not params:
         return UpsertResult(created=0, updated=0)
     created = updated = 0
-    async with conn.cursor() as cursor:
+    # Its own transaction, committed when the block ends, unless the caller
+    # already opened one with conn.transaction(): then it's a savepoint inside it.
+    async with conn.transaction(), conn.cursor() as cursor:
         await cursor.executemany(_UPSERT, params, returning=True)
         # One result set per book: a single row for an insert/update, empty for
         # a no-op.
