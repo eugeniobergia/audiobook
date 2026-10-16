@@ -1,7 +1,9 @@
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from audiobook.models import Audiobook
@@ -13,6 +15,24 @@ from audiobook.models import Audiobook
 class UpsertResult(NamedTuple):
     created: int
     updated: int
+
+
+@dataclass(frozen=True)
+class GenreCount:
+    genre: str | None  # None: audiobooks without a genre
+    count: int
+
+
+@dataclass(frozen=True)
+class YearCount:
+    year: int | None  # None: audiobooks without a release date
+    count: int
+
+
+@dataclass(frozen=True)
+class Stats:
+    by_genre: list[GenreCount]
+    by_release_year: list[YearCount]
 
 
 class StoredState(NamedTuple):
@@ -122,3 +142,103 @@ def _to_params(book: Audiobook) -> dict[str, Any]:
         "palette": Jsonb(list(book.palette)) if book.palette is not None else None,
         "content_hash": book.content_hash,
     }
+
+
+# --- Reads ----------------------------------------------------------------------
+
+_SELECT_AUDIOBOOK = sql.SQL("""
+SELECT id, title, author, description, genre, release_date, cover_url, palette,
+       content_hash, updated_at
+FROM audiobooks
+""")
+
+
+async def get_audiobook(conn: AsyncConnection, id_: int) -> Audiobook | None:
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute(_SELECT_AUDIOBOOK + sql.SQL("WHERE id = %s"), (id_,))
+        row = await cursor.fetchone()
+    return _to_audiobook(row) if row is not None else None
+
+
+async def list_audiobooks(
+    conn: AsyncConnection,
+    *,
+    q: str | None = None,
+    genre: str | None = None,
+    limit: int,
+    offset: int,
+) -> tuple[list[Audiobook], int]:
+    """One page of audiobooks sorted by title (then id), and the total matching.
+
+    `q` matches a case-insensitive substring of the title or the author; `genre`
+    matches the genre exactly, ignoring case. Both are optional and combine.
+    """
+    conditions: list[sql.Composable] = []
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if q:
+        conditions.append(sql.SQL("(title ILIKE %(q)s OR author ILIKE %(q)s)"))
+        params["q"] = f"%{_escape_like(q)}%"
+    if genre:
+        conditions.append(sql.SQL("lower(genre) = lower(%(genre)s)"))
+        params["genre"] = genre
+    where = (
+        sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+        if conditions
+        else sql.SQL("")
+    )
+
+    async with conn.cursor(row_factory=dict_row) as cursor:
+        # id breaks ties between equal titles, so pages never overlap or skip.
+        await cursor.execute(
+            _SELECT_AUDIOBOOK
+            + where
+            + sql.SQL(" ORDER BY title, id LIMIT %(limit)s OFFSET %(offset)s"),
+            params,
+        )
+        rows = await cursor.fetchall()
+    # A separate count: a page past the end has no rows to carry a window count.
+    cursor_ = await conn.execute(
+        sql.SQL("SELECT count(*) FROM audiobooks ") + where, params
+    )
+    count_row = await cursor_.fetchone()
+    total = count_row[0] if count_row is not None else 0
+    return [_to_audiobook(row) for row in rows], total
+
+
+async def get_stats(conn: AsyncConnection) -> Stats:
+    """Audiobook counts by genre (most common first) and by release year (oldest
+    first). Missing genres and dates are counted under None, listed last."""
+    genres = await conn.execute("""
+        SELECT genre, count(*)
+        FROM audiobooks
+        GROUP BY genre
+        ORDER BY genre IS NULL, count(*) DESC, genre
+    """)
+    years = await conn.execute("""
+        SELECT EXTRACT(YEAR FROM release_date)::int AS year, count(*)
+        FROM audiobooks
+        GROUP BY year
+        ORDER BY year NULLS LAST
+    """)
+    return Stats(
+        by_genre=[
+            GenreCount(genre=genre, count=count)
+            for genre, count in await genres.fetchall()
+        ],
+        by_release_year=[
+            YearCount(year=year, count=count) for year, count in await years.fetchall()
+        ],
+    )
+
+
+def _escape_like(text: str) -> str:
+    """Make LIKE's wildcards literal, so searching "100%" doesn't match "1000"."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _to_audiobook(row: dict[str, Any]) -> Audiobook:
+    palette = row["palette"]
+    # JSONB comes back as a list; the model (strict) wants a tuple.
+    return Audiobook.model_validate(
+        {**row, "palette": tuple(palette) if palette is not None else None}
+    )

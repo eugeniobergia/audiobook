@@ -7,9 +7,15 @@ from psycopg_pool import AsyncConnectionPool
 
 from audiobook.models import Audiobook
 from audiobook.repositories.audiobooks import (
+    GenreCount,
+    Stats,
     StoredState,
     UpsertResult,
+    YearCount,
+    get_audiobook,
     get_states,
+    get_stats,
+    list_audiobooks,
     upsert_many,
 )
 
@@ -256,3 +262,177 @@ async def test_states_reflect_upserted_palette(
         states = await get_states(conn, [1])
 
     assert states[1].missing_palette is (palette is None)
+
+
+# --- get_audiobook --------------------------------------------------------------
+
+
+async def test_get_audiobook_round_trips_every_field(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    book = make_book(palette=("#112233", "#aabbcc"))
+    await upsert(db_pool, book)
+
+    async with db_pool.connection() as conn:
+        found = await get_audiobook(conn, book.id)
+
+    assert found is not None
+    assert found.updated_at is not None  # set by the database
+    assert found.model_copy(update={"updated_at": None}) == book
+    assert found.palette == ("#112233", "#aabbcc")  # a tuple again, not a list
+
+
+async def test_get_missing_audiobook(db_pool: AsyncConnectionPool) -> None:
+    async with db_pool.connection() as conn:
+        assert await get_audiobook(conn, 404) is None
+
+
+# --- list_audiobooks ------------------------------------------------------------
+
+
+async def list_page(
+    pool: AsyncConnectionPool,
+    *,
+    q: str | None = None,
+    genre: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[int], int]:
+    """(ids on the page, total matching)."""
+    async with pool.connection() as conn:
+        books, total = await list_audiobooks(
+            conn, q=q, genre=genre, limit=limit, offset=offset
+        )
+    return [book.id for book in books], total
+
+
+@pytest.fixture
+async def catalog(db_pool: AsyncConnectionPool) -> None:
+    await upsert(
+        db_pool,
+        # id 3 is stored before id 1: without the id tie-break, the two "Dune"
+        # would likely come back in storage order (3, 1).
+        make_book(id=3, title="Dune", author="Brian Herbert", genre="Sci-Fi"),
+        make_book(id=1, title="Dune", author="Frank Herbert", genre="Sci-Fi"),
+        make_book(id=2, title="Emma", author="Jane Austen", genre="Classics"),
+        make_book(id=4, title="Anathem", author="Neal Stephenson", genre="sci-fi"),
+        make_book(id=5, title="100% Focus", author=None, genre=None),
+        make_book(id=6, title="2000 Days", author="An Author", genre="Business"),
+        make_book(id=7, title="my_book", author="X", genre="Business"),
+        # Decoys: they'd match "my_book" / "100%" if _ and % stayed wildcards.
+        make_book(id=8, title="myxbook", author="Y", genre="Business"),
+        make_book(id=9, title="Over 1000 Tips", author="Z", genre="Business"),
+    )
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_list_sorts_by_title_then_id(db_pool: AsyncConnectionPool) -> None:
+    ids, total = await list_page(db_pool)
+
+    # "Dune" twice: id breaks the tie. Digits sort before letters. (Titles avoid
+    # punctuation-only differences: how those sort depends on the collation.)
+    assert ids == [5, 6, 4, 1, 3, 2, 7, 8, 9]
+    assert total == 9
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_list_pages_dont_overlap_or_skip(db_pool: AsyncConnectionPool) -> None:
+    pages = [await list_page(db_pool, limit=3, offset=offset) for offset in (0, 3, 6)]
+
+    assert [ids for ids, _ in pages] == [[5, 6, 4], [1, 3, 2], [7, 8, 9]]
+    assert {total for _, total in pages} == {9}
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_page_past_the_end_still_reports_the_total(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    assert await list_page(db_pool, offset=100) == ([], 9)
+
+
+@pytest.mark.usefixtures("catalog")
+@pytest.mark.parametrize(
+    ("q", "expected_ids"),
+    [
+        pytest.param("dune", [1, 3], id="title-case-insensitive"),
+        pytest.param("HERBERT", [1, 3], id="author-case-insensitive"),
+        pytest.param("auste", [2], id="author-substring"),
+        pytest.param("ath", [4], id="title-substring"),
+        pytest.param("100%", [5], id="percent-is-literal"),
+        pytest.param("my_book", [7], id="underscore-is-literal"),
+        pytest.param("00 d", [6], id="spaces-kept"),
+        pytest.param("nothing like it", [], id="no-match"),
+    ],
+)
+async def test_list_search(
+    db_pool: AsyncConnectionPool, q: str, expected_ids: list[int]
+) -> None:
+    ids, total = await list_page(db_pool, q=q)
+
+    assert ids == expected_ids
+    assert total == len(expected_ids)
+
+
+@pytest.mark.usefixtures("catalog")
+@pytest.mark.parametrize(
+    ("genre", "expected_ids"),
+    [
+        pytest.param("Sci-Fi", [4, 1, 3], id="exact"),
+        pytest.param("SCI-FI", [4, 1, 3], id="case-insensitive"),
+        pytest.param("Sci", [], id="not-a-substring-match"),
+    ],
+)
+async def test_list_genre_filter(
+    db_pool: AsyncConnectionPool, genre: str, expected_ids: list[int]
+) -> None:
+    assert await list_page(db_pool, genre=genre) == (expected_ids, len(expected_ids))
+
+
+@pytest.mark.usefixtures("catalog")
+async def test_list_filters_combine(db_pool: AsyncConnectionPool) -> None:
+    assert await list_page(db_pool, q="dune", genre="sci-fi", limit=1) == ([1], 2)
+
+
+async def test_list_of_empty_catalog(db_pool: AsyncConnectionPool) -> None:
+    assert await list_page(db_pool) == ([], 0)
+
+
+# --- get_stats ------------------------------------------------------------------
+
+
+async def test_stats_count_by_genre_and_year_with_unknown_buckets(
+    db_pool: AsyncConnectionPool,
+) -> None:
+    await upsert(
+        db_pool,
+        make_book(id=1, genre="Fiction", release_date=date(2018, 4, 26)),
+        make_book(id=2, genre="Fiction", release_date=date(2018, 1, 1)),
+        make_book(id=3, genre="Fiction", release_date=date(2001, 1, 1)),
+        make_book(id=4, genre="Biography", release_date=None),
+        make_book(id=5, genre="Arts", release_date=date(2020, 6, 1)),
+        make_book(id=6, genre=None, release_date=None),
+        make_book(id=7, genre=None, release_date=date(2020, 1, 1)),
+    )
+
+    async with db_pool.connection() as conn:
+        stats = await get_stats(conn)
+
+    assert stats == Stats(
+        by_genre=[
+            GenreCount(genre="Fiction", count=3),
+            GenreCount(genre="Arts", count=1),  # ties: alphabetical
+            GenreCount(genre="Biography", count=1),
+            GenreCount(genre=None, count=2),  # unknown is always last
+        ],
+        by_release_year=[
+            YearCount(year=2001, count=1),
+            YearCount(year=2018, count=2),
+            YearCount(year=2020, count=2),
+            YearCount(year=None, count=2),
+        ],
+    )
+
+
+async def test_stats_of_empty_catalog(db_pool: AsyncConnectionPool) -> None:
+    async with db_pool.connection() as conn:
+        assert await get_stats(conn) == Stats(by_genre=[], by_release_year=[])
