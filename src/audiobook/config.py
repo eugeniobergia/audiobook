@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,9 @@ class Settings(BaseSettings):
     # Upstream source. Point the URL somewhere unreachable to exercise the fallback.
     itunes_base_url: str = "https://itunes.apple.com"
     itunes_timeout_seconds: float = 10.0
+
+    # How many cover images ingestion downloads at once to compute palettes.
+    palette_concurrency: int = Field(default=10, gt=0)
 
     @property
     def database_url(self) -> str:
