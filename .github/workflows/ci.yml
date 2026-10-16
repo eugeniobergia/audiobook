@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch or PR cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The jobs only read the code.
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, type check and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Same database as docker-compose.yml, for the tests that need Postgres.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: audiobook
+          POSTGRES_PASSWORD: audiobook
+          POSTGRES_DB: audiobook
+        ports:
+          - 5432:5432
+        # Wait until Postgres accepts connections before running the steps.
+        options: >-
+          --health-cmd "pg_isready -U audiobook"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+
+    # No .env file in CI: the settings come from the environment instead. The
+    # tests create their own audiobook_test database on this server.
+    env:
+      POSTGRES_USER: audiobook
+      POSTGRES_PASSWORD: audiobook
+      POSTGRES_DB: audiobook
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      # Exactly the locked versions, dev tools included. uv installs the Python
+      # version from .python-version.
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: make lint
+
+      - name: Type check
+        run: make typecheck
+
+      - name: Test
+        run: make test
+
+  docker:
+    name: Docker Compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # What a reviewer does from a clean checkout: configure from the example,
+    # start everything with Docker Compose, and use the API.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure from .env.example
+        run: cp .env.example .env
+
+      - name: Start the stack
+        run: docker compose up --build --detach --wait
+
+      # --wait above returns once both services report healthy (the api's
+      # healthcheck calls /health), so the API is ready here.
+      - name: Health check
+        run: curl --fail --silent --show-error http://localhost:8000/health
+
+      - name: Authenticated request works
+        run: |
+          api_key=$(grep '^API_KEY=' .env | cut -d= -f2-)
+          curl --fail --silent --show-error -H "X-API-Key: $api_key" \
+            "http://localhost:8000/audiobooks?limit=1"
+
+      - name: Unauthenticated request is rejected
+        run: |
+          http_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://localhost:8000/audiobooks)
+          test "$http_status" = 401
+
+      - name: Show logs
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes

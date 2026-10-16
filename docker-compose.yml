@@ -37,6 +37,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Healthy once the app answers /health (after it connected to Postgres and
+    # applied the schema), so `docker compose up --wait` waits for a usable API.
+    # Python instead of curl: the slim image has no curl.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
 
 volumes:
   pgdata:
