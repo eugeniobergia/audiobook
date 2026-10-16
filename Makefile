@@ -2,7 +2,7 @@
 
 # Rewrites files: applies safe lint fixes (e.g. import order), then formats.
 format:
-	uv run ruff check --fix
+	uv run ruff check --fix --exit-zero
 	uv run ruff format
 
 lint:
