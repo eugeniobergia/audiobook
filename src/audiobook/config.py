@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     host: str = "localhost"
     port: int = 8000
 
+    # Upstream source. Point the URL somewhere unreachable to exercise the fallback.
+    itunes_base_url: str = "https://itunes.apple.com"
+    itunes_timeout_seconds: float = 10.0
+
     @property
     def database_url(self) -> str:
         return (

@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import APIRouter, Depends, FastAPI
 
 from audiobook.api.auth import require_api_key
@@ -12,14 +13,22 @@ from audiobook.db.db import apply_schema, create_pool
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    pool = create_pool(get_settings().database_url)
+    settings = get_settings()
+    pool = create_pool(settings.database_url)
     # wait=True: fail at startup if the database is unreachable, not on the
     # first request.
     await pool.open(wait=True)
     try:
         await apply_schema(pool)
-        app.state.pool = pool
-        yield
+        # One shared HTTP client for iTunes, so connections are reused across
+        # requests. The context manager closes it on shutdown.
+        async with httpx.AsyncClient(
+            base_url=settings.itunes_base_url,
+            timeout=settings.itunes_timeout_seconds,
+        ) as http:
+            app.state.pool = pool
+            app.state.http = http
+            yield
     finally:
         await pool.close()
 
