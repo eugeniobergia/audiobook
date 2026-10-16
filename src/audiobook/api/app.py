@@ -1,8 +1,11 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 
+from audiobook.api.auth import require_api_key
+from audiobook.api.errors import ErrorResponse, register_error_handlers
+from audiobook.api.routes import health
 from audiobook.config import get_settings
 from audiobook.db.db import apply_schema, create_pool
 
@@ -28,9 +31,18 @@ def create_app() -> FastAPI:
         "search and export them.",
         lifespan=lifespan,
     )
+    register_error_handlers(app)
 
-    @app.get("/health", tags=["health"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    app.include_router(health.router)
+
+    # Everything on this router requires the API key. Feature routers (audiobooks,
+    # ingestions, stats) are included here, so new endpoints are protected by default.
+    protected = APIRouter(
+        dependencies=[Depends(require_api_key)],
+        responses={
+            401: {"model": ErrorResponse, "description": "Missing or invalid API key"}
+        },
+    )
+    app.include_router(protected)
 
     return app

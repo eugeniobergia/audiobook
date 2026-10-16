@@ -48,3 +48,4 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
+asyncio_mode = "auto"
